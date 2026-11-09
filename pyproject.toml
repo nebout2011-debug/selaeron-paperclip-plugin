@@ -1,0 +1,9 @@
+[project]
+name = "paperclip-comment-plugin"
+version = "0.1.0"
+requires-python = ">=3.10"
+description = "Comment-only Paperclip writeback plugin for Hermes, bound to the current Paperclip run ID."
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

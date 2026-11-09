@@ -1,0 +1,11 @@
+name: selaeron-paperclip-sel9
+version: 0.1.0
+description: "Approved, comment-only Paperclip writeback for Hermes, bound to the current Paperclip run ID."
+author: SELAERON Labs
+kind: tool
+requires_env:
+  - PAPERCLIP_API_URL
+  - PAPERCLIP_API_KEY
+  - PAPERCLIP_RUN_ID
+provides_tools:
+  - selaeron_paperclip_sel9_comment
