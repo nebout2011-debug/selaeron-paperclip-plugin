@@ -170,38 +170,48 @@ def test_register_uses_hermes_schema_shape():
     assert seen["schema"]["parameters"]["required"] == ["summary"] and seen["schema"]["description"]
 
 
-# ---- credentials come from the profile .env into a LOCAL dict only ----
+# ---- credentials come through Hermes's get_secret (profile-scoped), never from a .env file ----
 SECRET = "k" * 12 + "SECRET-TOKEN-" + "z" * 12
 
 
-def _profile_env(monkeypatch, tmp_path, text=None):
-    f = tmp_path / ".env"
-    f.write_text(text if text is not None else
-                 "# c\nAPI_SERVER_KEY=do-not-load-me-1234567890\nPAPERCLIP_COMPANY_ID=co\n"
-                 f"PAPERCLIP_API_URL='https://paperclip.example.test'\nPAPERCLIP_API_KEY=\"{SECRET}\"\n",
-                 encoding="utf-8")
-    monkeypatch.setattr(plug, "_PROFILE_ENV_PATH", f)
+def _profile_secrets(monkeypatch, values=None):
+    """Stand in for agent.secret_scope.get_secret: a profile scope that is NOT os.environ."""
+    values = {"PAPERCLIP_API_URL": "https://paperclip.example.test", "PAPERCLIP_API_KEY": SECRET} if values is None else values
+    monkeypatch.setattr(plug, "_get_secret", lambda name, default=None: values.get(name, default))
     monkeypatch.delenv("PAPERCLIP_API_URL", raising=False)
     monkeypatch.delenv("PAPERCLIP_API_KEY", raising=False)
-    monkeypatch.delenv("API_SERVER_KEY", raising=False)
 
 
-def test_profile_env_values_read_but_only_allowlisted_and_not_in_os_environ(monkeypatch, tmp_path):
-    _profile_env(monkeypatch, tmp_path)
+def test_secrets_resolved_through_get_secret_and_not_in_os_environ(monkeypatch):
+    _profile_secrets(monkeypatch)
     env = plug._config_env()
     assert env["PAPERCLIP_API_URL"] == "https://paperclip.example.test" and env["PAPERCLIP_API_KEY"] == SECRET
-    assert "API_SERVER_KEY" not in env and "PAPERCLIP_COMPANY_ID" not in env     # allowlist
     assert "PAPERCLIP_API_KEY" not in os.environ and "PAPERCLIP_API_URL" not in os.environ
 
 
-def test_process_environment_wins_over_profile_env(monkeypatch, tmp_path):
-    _profile_env(monkeypatch, tmp_path)
+def test_process_wide_value_not_used_when_get_secret_has_none(monkeypatch):
+    """Multiplexing: another profile's os.environ key must never be picked up when get_secret has no value."""
+    _profile_secrets(monkeypatch, values={})
     monkeypatch.setenv("PAPERCLIP_API_KEY", "p" * 32)
-    assert plug._config_env()["PAPERCLIP_API_KEY"] == "p" * 32
+    assert "PAPERCLIP_API_KEY" not in plug._config_env()
 
 
-def test_lookup_and_write_use_profile_env_never_leak(monkeypatch, tmp_path, caplog, capsys):
-    _profile_env(monkeypatch, tmp_path)
+def test_get_secret_failure_fails_closed(monkeypatch):
+    def boom(name, default=None):
+        raise RuntimeError("no profile secret scope")
+    monkeypatch.setattr(plug, "_get_secret", boom)
+    monkeypatch.setattr(plug, "_lookup_transport", lambda *a: (_ for _ in ()).throw(AssertionError("no call")))
+    assert "PAPERCLIP_API_KEY" not in plug._config_env()
+    assert json.loads(plug.hermes_handler({"summary": "s"}))["code"] == "LOOKUP_UNAVAILABLE"
+
+
+def test_standalone_fallback_reads_os_environ(monkeypatch):
+    monkeypatch.setenv("PAPERCLIP_API_KEY", "p" * 32)
+    assert plug._config_env()["PAPERCLIP_API_KEY"] == "p" * 32   # outside Hermes, get_secret is os.environ
+
+
+def test_lookup_and_write_use_get_secret_never_leak(monkeypatch, caplog, capsys):
+    _profile_secrets(monkeypatch)
     seen = {}
     def transport(method, url, data, headers, timeout, max_bytes):
         seen.setdefault("urls", []).append(url)
@@ -220,17 +230,18 @@ def test_lookup_and_write_use_profile_env_never_leak(monkeypatch, tmp_path, capl
     assert "PAPERCLIP_API_KEY" not in os.environ
 
 
-def test_missing_or_bad_profile_env_fails_closed(monkeypatch, tmp_path):
-    _profile_env(monkeypatch, tmp_path, "PAPERCLIP_API_URL=https://evil.example\nPAPERCLIP_API_KEY=" + "a" * 32 + "\n")
+def test_wrong_origin_or_missing_secrets_fail_closed(monkeypatch):
     monkeypatch.setattr(plug, "_lookup_transport", lambda *a: (_ for _ in ()).throw(AssertionError("no call")))
+    _profile_secrets(monkeypatch, values={"PAPERCLIP_API_URL": "https://evil.example", "PAPERCLIP_API_KEY": "a" * 32})
     assert json.loads(plug.hermes_handler({"summary": "s"}))["code"] == "LOOKUP_UNAVAILABLE"   # origin gate
-    monkeypatch.setattr(plug, "_PROFILE_ENV_PATH", tmp_path / "nope.env")
-    assert json.loads(plug.hermes_handler({"summary": "s"}))["code"] == "LOOKUP_UNAVAILABLE"   # no file
+    _profile_secrets(monkeypatch, values={})
+    assert json.loads(plug.hermes_handler({"summary": "s"}))["code"] == "LOOKUP_UNAVAILABLE"   # no secrets
 
 
-def test_profile_env_path_only_for_deployed_layout():
-    assert plug._PROFILE_ENV_PATH is None
-    assert plug._profile_env_path() is None          # repo layout: never reads some parent directory's .env
+def test_plugin_never_reads_dotenv_files():
+    import inspect
+    src = inspect.getsource(plug)
+    assert ".env" not in src.replace("os.environ", "") and "read_text" not in src
 
 
 def test_model_cannot_choose_issue_and_unapproved_issue_refused(monkeypatch):

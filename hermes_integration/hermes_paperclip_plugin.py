@@ -7,7 +7,6 @@ import json
 import os
 import re
 import threading
-from pathlib import Path
 from typing import Any, Dict, Optional
 
 from . import connector as _connector
@@ -22,37 +21,28 @@ from .paperclip import (
     register_paperclip_writeback_tool,
 )
 
-# The multiplex gateway process does not load a profile's .env into os.environ, so read the two values
-# this plugin needs from the profile's own .env into a LOCAL dict (never os.environ, never logged).
-_PROFILE_ENV_KEYS = ("PAPERCLIP_API_URL", "PAPERCLIP_API_KEY")  # allowlist: nothing else is ever read
-_PROFILE_ENV_PATH: Any = None  # tests override; None = derive from this file's location
+# Credentials come through Hermes: get_secret honours the active profile (a bare os.environ read could
+# pick up another profile's key under multiplexing). Outside Hermes (tests, standalone) it is os.environ.
+try:
+    from agent.secret_scope import get_secret as _get_secret
+except ImportError:
+    def _get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
+        return os.environ.get(name, default)
 
-
-def _profile_env_path() -> Optional[Path]:
-    """<profile>/.env when deployed as <profile>/plugins/<plugin>/hermes_integration/<this file>, else None."""
-    if _PROFILE_ENV_PATH is not None:
-        return Path(_PROFILE_ENV_PATH)
-    parents = Path(__file__).resolve().parents
-    if len(parents) > 3 and parents[2].name == "plugins":
-        return parents[3] / ".env"
-    return None
+_SECRET_KEYS = ("PAPERCLIP_API_URL", "PAPERCLIP_API_KEY")  # allowlist: nothing else is ever resolved as a secret
 
 
 def _config_env() -> Dict[str, str]:
-    """A fresh dict: process environment, with missing PAPERCLIP_API_URL/KEY filled from the profile .env."""
+    """A fresh dict: process environment, with the two secrets resolved through get_secret (never os.environ)."""
     env = dict(os.environ)
-    path = _profile_env_path()
-    if path is None:
-        return env
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return env
-    for line in lines:
-        key, sep, value = line.partition("=")
-        key = key.strip()
-        if sep and key in _PROFILE_ENV_KEYS and not env.get(key):
-            env[key] = value.strip().strip("'\"")
+    for key in _SECRET_KEYS:
+        env.pop(key, None)  # never keep a process-wide value that get_secret did not vouch for
+        try:
+            value = _get_secret(key)
+        except Exception:  # e.g. no profile scope while multiplexing: fail closed (missing => lookup refused)
+            value = None
+        if value:
+            env[key] = value
     return env
 
 
